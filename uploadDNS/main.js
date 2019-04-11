@@ -1,105 +1,163 @@
-var router = require('request');
-var dnspod = require('request');
-
+var router = require('request-promise');
+var dnspod = require('request-promise');
 var querystring = require('querystring');
 
-var routerOpt = {
-    url: "http://home.jcdev.cc:8888/cgi-bin/luci/;stok=/login?form=login",
-    method: "POST",
-    headers: {
-        "Accept": "application/json",
-        "Referer": "http://home.jcdev.cc:8888/webpages/login.html",
-        "Content-Type": "application/x-www-form-urlencoded"
-    }
-}
-
-var routerLoginData = {
-    "data": '{"method":"login","params":{"username":"admin","password":"6e84923fb45013217b1118a7b71c2455bf8d46a81eae11a77f525b8b1d841d9ab0b7353840923ee2f244d65181fb49b79f0bdf761bdc05c17656c29ab9e9b60fc1b897d966de1d9f0a9d53e74eac10b5733d25b69164f9a0fada1e5d4c1b49ab95572f35fce65f647e607ecfc10bc8fafef8472952490c4a5ef876c8796a51a6"}}'
-}
-
-var routerStatusData = {
-    "data": '{"method":"get"}'
-}
-
-var encodedData = querystring.stringify(routerLoginData);
-console.log(encodedData);
-
-routerOpt.body = encodedData;
-var stok;
-router(routerOpt,function(err,res,body){
-    console.log(res.statusCode);
-    if(res.statusCode == "200"){
-        stok = JSON.parse(body).result.stok;
-        console.log(stok);
-        routerOpt.headers.Cookie = res.headers["set-cookie"];
-        getIp(stok);
-    }
-    console.log(body);
+console.log("starting ip sync.");
+syncIp().then(()=>{
+    console.log("ip sync is done.")
+}).catch((reason) =>{
+    console.log("ip sync failure, because " + reason);
 });
 
-function getIp(stok){
-    routerOpt.url = "http://home.jcdev.cc:8888/cgi-bin/luci/;stok=" + stok + "/admin/system_state?form=system_state";
-    routerOpt.body = querystring.stringify(routerStatusData);
+async function loginRouter(){
+    let routerOpt = {
+        url: "http://router.jcdev.cc:8888/cgi-bin/luci/;stok=/login?form=login",
+        method: "POST",
+        headers: {
+            "Accept": "application/json",
+            "Referer": "http://router.jcdev.cc:8888/webpages/login.html",
+            "Content-Type": "application/x-www-form-urlencoded"
+        },
+        body: querystring.stringify({
+            "data": '{"method":"login","params":{"username":"admin","password":"6e84923fb45013217b1118a7b71c2455bf8d46a81eae11a77f525b8b1d841d9ab0b7353840923ee2f244d65181fb49b79f0bdf761bdc05c17656c29ab9e9b60fc1b897d966de1d9f0a9d53e74eac10b5733d25b69164f9a0fada1e5d4c1b49ab95572f35fce65f647e607ecfc10bc8fafef8472952490c4a5ef876c8796a51a6"}}'
+        })
+    };
 
-    router(routerOpt, function(err,res,body){
-        if(res.statusCode == "200"){
-            var ips = {};
-            var normal = JSON.parse(body).result[0].normal;
-            ips.telecom = normal[0].ipaddr;
-            ips.unicom = normal[1].ipaddr;
-            console.log(ips);
-            uploadIps(ips);
-        }
-    });
+    let loginInfo = {
+        "stok": "",
+        "opt": routerOpt
+    };
+    
+    console.log("getting stok from router..");
+    try{
+        let result = await router(routerOpt, function(err,res,body){
+            loginInfo.opt.headers.Cookie = res && res.headers["set-cookie"];
+        });
+        result = JSON.parse(result);
+        if(result.error_code != "0") return Promise.reject("password validation error!"); 
+
+        loginInfo.stok = result.result.stok;
+        loginInfo.opt.url = "http://router.jcdev.cc:8888/cgi-bin/luci/;stok=" + loginInfo.stok + "/admin/system_state?form=system_state";
+        loginInfo.opt.body = querystring.stringify({"data": '{"method":"get"}'});
+        console.log("stok no. is :" + loginInfo.stok);
+        return Promise.resolve(loginInfo);
+    }
+    catch(err)
+    {
+        return Promise.reject(err.message);
+    }
+};
+
+async function getIpFromRouter(stok, opt){
+    console.log("getting ip address from router..");
+    try{
+        let ips = {};
+        let result = await router(opt);
+        result = JSON.parse(result);
+        if (result.error_code != "0") return Promise.reject("error for getting ips");
+
+        let normal = result.result[0].normal;
+        ips.telecom = normal[0].ipaddr;
+        ips.unicom = normal[1].ipaddr;
+        console.log("ip address is " + JSON.stringify(ips));
+        return Promise.resolve(ips);
+    } catch(err) {
+        return Promise.reject(err.message);
+    }
 }
 
-function uploadIps(ips){
-    var queryOpt = {
+async function syncIp() {
+    try {
+        let info = await loginRouter();
+        let ips = await getIpFromRouter(info.stok, info.opt);
+        let ipsDns = await getIpFromDns();
+        if (ips.telecom != ipsDns.telecom.value) {
+            //更新电信数据
+            console.log("upload telecom host ip to dns ..");
+            uploadIps(ips.telecom, ipsDns.telecom.id, "home", "0", "A");
+        } 
+
+        if (ips.unicom != ipsDns.unicom.value) {
+            //更新联通数据
+            console.log("upload unicom host ip to dns ..");
+            uploadIps(ips.unicom, ipsDns.unicom.id, "home", "10=1", "A");
+        }
+    } catch (err) {
+        return Promise.reject(err);
+    }
+}
+
+async function getIpFromDns() {
+    let opt = {
         "url": "https://dnsapi.cn/Record.List",
         method: "POST",
         headers: {
             "Content-Type": "application/x-www-form-urlencoded"
         },
-        body: {
+        body: querystring.stringify( {
             "login_token": "90628,fe6a1f18839f83dc56d3472f27cbdd23",
             "format": "json",
             "domain": "jcdev.cc",
             "sub_domain": "home"
+        }),
+    };
+
+    console.log("getting dns host ip ...");
+    try {
+        let result = await dnspod(opt);
+        let ips = {
+            "telecom" : {},
+            "unicom" : {}
         }
+        result = JSON.parse(result);
+        if (result.status.code != "1") { return Promise.reject(result.status.message); }
+
+        for (i = 0; i < result.records.length; i++) {
+            switch (result.records[i].remark) {
+                case "电信": 
+                    console.log("dns telecom host ip is " + JSON.stringify(result.records[i]));
+                    ips.telecom = result.records[i];
+                    break;
+                case "联通": 
+                    console.log("dns unicom host ip is " + JSON.stringify(result.records[i]));
+                    ips.unicom = result.records[i];
+                    break;
+            }
+        }
+
+        return Promise.resolve(ips);
+    } catch( err ) {
+        return Promise.reject(err.message);
     }
+}
 
-
-    var opt = {
+async function uploadIps(ip, id, name, line_id, type){
+    let opt = {
         "url": "https://dnsapi.cn/Record.Modify",
         method: "POST",
         headers: {
             "Content-Type": "application/x-www-form-urlencoded"
         }
     };
-    var data = {        
+    let data = {        
         "login_token": "90628,fe6a1f18839f83dc56d3472f27cbdd23",
         "format": "json",
         "domain": "jcdev.cc",
-        "record_id": "415380637",
-        "record_line_id": "0",
-        "record_type": "A",
-        "sub_domain": "home"
+        "record_id": id,
+        "record_line_id": line_id,
+        "record_type": type,
+        "sub_domain": name,
+        "value": ip
     };
 
-    data.value = ips.telecom;
-
     opt.body = querystring.stringify(data);
-    
-    dnspod(opt,function(err,res,body){
-        console.log(body);
-    });
-
-    data.record_id = "415379011";
-    data.record_line_id = "10=1";
-    data.value = ips.unicom;
-    dnspod(opt,function(err,res,data){
-        console.log(data);
-    });
+    try {
+        let result = await dnspod(opt);
+        result = JSON.parse(result);
+        if (result.status.code != "1") { return Promise.reject(result.status.message); }
+        else return Promise.resolve(result.status.message);
+    } catch( err ) {
+        return Promise.reject(err.message);
+    }
 }
 
-async 
