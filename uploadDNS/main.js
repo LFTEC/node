@@ -1,13 +1,34 @@
 var router = require('request-promise');
 var dnspod = require('request-promise');
 var querystring = require('querystring');
+var moment = require('moment');
+var args = process.argv.splice(2);
 
-console.log("starting ip sync.");
+let ips = {
+    telecom: args[1],
+    unicom: args[0]
+};
+console.log(getDate() + "starting node ip sync to dns.");
 syncIp().then(()=>{
-    console.log("ip sync is done.")
+    console.log(getDate() + "ip sync is done.")
 }).catch((reason) =>{
-    console.log("ip sync failure, because " + reason);
+    console.error(getDate() + "ip sync failure, because " + reason);
 });
+
+
+// setInterval(function(){
+//     console.log("starting ip sync.");
+//     syncIp().then(()=>{
+//         console.log("ip sync is done.")
+//     }).catch((reason) =>{
+//         console.log("ip sync failure, because " + reason);
+//     });
+// }, 300000);
+
+function getDate(){
+    let date = new Date();
+    return "[" + moment(date).format("YYYY-MM-DD HH:mm:ss") + "] ";
+}
 
 async function loginRouter(){
     let routerOpt = {
@@ -68,19 +89,27 @@ async function getIpFromRouter(stok, opt){
 
 async function syncIp() {
     try {
-        let info = await loginRouter();
-        let ips = await getIpFromRouter(info.stok, info.opt);
+        // let info = await loginRouter();
+        // let ips = await getIpFromRouter(info.stok, info.opt);
         let ipsDns = await getIpFromDns();
         if (ips.telecom != ipsDns.telecom.value) {
             //更新电信数据
-            console.log("upload telecom host ip to dns ..");
-            uploadIps(ips.telecom, ipsDns.telecom.id, "home", "0", "A");
+            console.log(getDate() + "uploading telecom host ip to dns ..");
+            await uploadIps(ips.telecom, ipsDns.telecom.id, "home", "0", "A");
+            console.log(getDate() + "uploaded telecom host ip to dns ..");
         } 
+        else {
+            console.log(getDate() + "do not need to sync telecom ip address.");
+        }
 
         if (ips.unicom != ipsDns.unicom.value) {
             //更新联通数据
-            console.log("upload unicom host ip to dns ..");
-            uploadIps(ips.unicom, ipsDns.unicom.id, "home", "10=1", "A");
+            console.log(getDate() + "uploading unicom host ip to dns ..");
+            await uploadIps(ips.unicom, ipsDns.unicom.id, "home", "10=1", "A");
+            console.log(getDate() + "uploaded telecom host ip to dns ..");
+        }
+        else {
+            console.log(getDate() + "do not need to sync unicom ip address.");
         }
     } catch (err) {
         return Promise.reject(err);
@@ -102,7 +131,7 @@ async function getIpFromDns() {
         }),
     };
 
-    console.log("getting dns host ip ...");
+    console.log(getDate() + "getting host ip from DNS ...");
     try {
         let result = await dnspod(opt);
         let ips = {
@@ -115,11 +144,11 @@ async function getIpFromDns() {
         for (i = 0; i < result.records.length; i++) {
             switch (result.records[i].remark) {
                 case "电信": 
-                    console.log("dns telecom host ip is " + JSON.stringify(result.records[i]));
+                    console.log(getDate() + "telecom host ip in DNS is " + result.records[i].value);
                     ips.telecom = result.records[i];
                     break;
                 case "联通": 
-                    console.log("dns unicom host ip is " + JSON.stringify(result.records[i]));
+                    console.log(getDate() + "unicom host ip in DNS is " + result.records[i].value);
                     ips.unicom = result.records[i];
                     break;
             }
